@@ -1,0 +1,253 @@
+---
+title: "final project soft submission"
+author: "Lisiman Hua"
+date: "12/4/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, warning = F, message = F)
+```
+
+```{r}
+library(censusapi)
+library(tidyverse)
+library(tigris)
+library(sf)
+library(leaflet)
+library(mapview)
+library(ggplot2)
+
+Sys.setenv(CENSUS_KEY="c8aa67e4086b4b5ce3a8717f59faa9a28f611dab")
+```
+
+```{r}
+pums_2015_2019<- 2015:2019 %>%
+  map_dfr(function(x){  
+    getCensus(
+    name = "acs/acs1/pums",
+    vintage = x,
+    region = "public use microdata area:*",
+    regionin = "state:06",
+    vars = c(
+     "SERIALNO", # housing
+     "SPORDER", # person
+     "PWGTP", # weighting
+     "WGTP", #weighting
+     "BLD", #units in structure
+     "TEN", # tenure 
+     "VALP", #housing value
+     "MV", #when moved in
+     "HINCP", #household income
+     "JWMNP", #commute time
+     "OCPIP" # rent as percentage of monthly income
+   )) %>%
+     mutate(year = x)
+  }
+ )
+```
+
+```{r}
+saveRDS(pums_2015_2019, "final_pums.rds")
+# pums_2019_5yr <- readRDS("final_pums.rds")
+```
+
+```{r}
+ca_pumas <-
+  pumas("CA", cb = T, progress_bar = F)
+
+bay_county_names <-
+  c(
+    "Alameda",
+    "Contra Costa",
+    "Marin",
+    "Napa",
+    "San Francisco",
+    "San Mateo",
+    "Santa Clara",
+    "Solano",
+    "Sonoma"
+  )
+
+bay_counties <-
+  counties("CA", cb = T, progress_bar = F) %>%
+  filter(NAME %in% bay_county_names)
+
+bay_pumas <-
+  ca_pumas %>% 
+  st_centroid() %>% 
+  .[bay_counties, ] %>% 
+  st_drop_geometry() %>% 
+  left_join(ca_pumas %>% select(GEOID10)) %>% 
+  st_as_sf()
+
+bay_pums_5yrs <-
+  pums_2015_2019 %>% 
+  mutate(
+    PUMA = str_pad(public_use_microdata_area,5,"left","0")
+  ) %>% 
+  filter(PUMA %in% bay_pumas$PUMACE10)%>% 
+  mutate(JWMNP = as.numeric(JWMNP)) %>%
+  filter(JWMNP > 0 & JWMNP < 200) %>%
+  mutate(TEN = as.numeric(TEN)) %>%
+  filter(TEN > 0) %>%
+  filter(TEN < 4) %>%
+  select(-state) 
+
+bay_pums_5yrs$TEN = gsub("1","own with loan", bay_pums_5yrs$TEN)
+bay_pums_5yrs$TEN = gsub("2","own free and clear", bay_pums_5yrs$TEN)
+bay_pums_5yrs$TEN = gsub("3","rented", bay_pums_5yrs$TEN)
+
+saveRDS(bay_pums_5yrs, "final_bay_pums.rds")
+```
+
+```{r}
+# bay_pums_5yrs <- readRDS("final_bay_pums.rds")
+```
+
+```{r}
+bay_pums_5yrs %>% count(OCPIP > 0)
+bay_pums_5yrs %>% count(VALP > 0)
+bay_pums_5yrs <- bay_pums_5yrs %>%
+  filter(OCPIP > 0) %>%
+  filter(VALP > 0)
+```
+
+```{r}
+bay_commute <- bay_pums_5yrs %>% 
+  group_by(TEN, year) %>% 
+  summarise(commute_mean = mean(JWMNP))
+
+ggplot(data=bay_commute, aes(x=year, y=commute_mean, color=TEN)) +
+  geom_line()
+```
+
+```{r}
+bay_commute_pums <- bay_pums_5yrs %>% 
+  group_by(PUMA) %>% 
+  summarise(commute_mean = mean(JWMNP)) %>% 
+  left_join(
+    bay_pumas %>% 
+      select(PUMACE10),
+    by = c("PUMA" = "PUMACE10")
+  ) %>% 
+  st_as_sf()
+
+pums_pal <- colorNumeric(
+  palette = "Oranges",
+  domain = bay_commute_pums$commute_mean
+)
+
+leaflet() %>%
+  addTiles() %>% 
+  addPolygons(
+    data = bay_commute_pums,
+    fillColor = ~pums_pal(commute_mean),
+    color = "white",
+    opacity = 0.5,
+    fillOpacity = 0.5,
+    weight = 1,
+    label = ~paste(
+      "mean time of commute (one-way) in min is",
+      round(commute_mean)
+    ),
+    highlightOptions = highlightOptions(
+      weight = 2,
+      opacity = 1
+    )
+  ) %>% 
+  addLegend(
+    data = bay_commute_pums,
+    pal = pums_pal,
+    values = ~commute_mean,
+    title = "mean time of commute"
+  )
+```
+
+```{r}
+bay_housing_value <- 
+  bay_pums_5yrs %>% 
+  mutate(VALP = as.numeric(VALP)) %>%
+  filter(VALP>0) %>%
+  filter(TEN != "rented") %>%
+  group_by(year, TEN) %>%
+  summarise(med_housing_value= median(VALP))
+
+ggplot(data=bay_housing_value, aes(x=year, y = med_housing_value , color = TEN)) +
+  geom_line()
+```
+
+```{r}
+bay_housing_value_pums <- bay_pums_5yrs %>% 
+  group_by(PUMA) %>% 
+  mutate(VALP = as.numeric(VALP)) %>%
+  filter(VALP>0) %>%
+  filter(TEN != "rented") %>%
+  summarise(median_housing_value = median(VALP)) %>% 
+  left_join(
+    bay_pumas %>% 
+      select(PUMACE10),
+    by = c("PUMA" = "PUMACE10")
+  ) %>% 
+  st_as_sf()
+
+pums_pal <- colorNumeric(
+  palette = "Oranges",
+  domain = bay_housing_value_pums$median_housing_value
+)
+
+leaflet() %>%
+  addTiles() %>% 
+  addPolygons(
+    data = bay_housing_value_pums,
+    fillColor = ~pums_pal(median_housing_value),
+    color = "white",
+    opacity = 0.5,
+    fillOpacity = 0.5,
+    weight = 1,
+    label = ~paste(
+      "median housing value is",
+      round(median_housing_value)
+    ),
+    highlightOptions = highlightOptions(
+      weight = 2,
+      opacity = 1
+    )
+  ) %>% 
+  addLegend(
+    data = bay_housing_value_pums,
+    pal = pums_pal,
+    values = ~median_housing_value,
+    title = "median housing value"
+  )
+```
+
+```{r}
+model <- lm(JWMNP~TEN, data = bay_pums_5yrs)
+summary(model)
+```
+
+```{r}
+bay_commute_by_year <- bay_pums_5yrs %>%
+  group_by(year) %>%
+  mutate(commute = mean(JWMNP))
+
+
+ggplot(data=bay_commute_by_year, aes(x=year, y=commute)) +
+  geom_line()
+```
+
+```{r}
+bay_pums_5yrs <- bay_pums_5yrs %>%
+  mutate(VALP = as.numeric(VALP)) %>%
+  mutate(HINCP = as.numeric(HINCP)) 
+
+model <- lm(JWMNP~year+TEN+VALP+HINCP, data = bay_pums_5yrs)
+summary(model)
+```
+
+```{r}
+model <- lm(JWMNP~year+TEN+VALP+HINCP+PUMA, data = bay_pums_5yrs)
+summary(model)
+```
+
