@@ -1,0 +1,1171 @@
+---
+title: "final project"
+author: "Lisiman Hua"
+date: "12/11/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, warning = F, message = F)
+```
+
+Due to COVID and COVID-induced work from home policy, a large portion of the bay area tech workers moved away to where rents and other living expenses are lower. Although news and reports indicate that people are gradually coming back after the WFH relocating wave, the underlying problems are not actually solved. According to the 2021 Silicon Valley Pool by Joint Venture, 56% of respondents in the 5 different counties in the bay area indicate they plan to leave permanently in the next few years. The top two reasons for wanting to move are the high cost of living (84%) and high housing costs (77%). 95% of respondents who now work from home say they want to continue working remotely some of the time mainly because it can save commuting and can better deal with family responsibilities such as childcare. While the housing price has been surging since 2012, many people can only live far away from their company to avoid the extremely high cost of living in the center of the silicon valley. However, that has led to longer commuting and thus drastically jeopardizing their well-being and job satisfaction as well as hurting their productivity according to various studies.
+
+Therefore, I'm interested in looking into the relationship between housing price and people's migration pattern as well as looking into what elements may affect people's commuting time. Although data for COVID era has not been available yet, we can still look the pre-COVID time. Since I did not find good dataset for cost of living, I decided to use the ACS mobility dataset to use income as a proxy to examine whether there is a relationship between household income and the number of people migrating in and outside of the bay area. In addition to that, I would also like to study the typical commuting time of Silicon valley workers and whether it is affected by household income and housing price using the data ACS PUMA data. 
+
+```{r}
+library(censusapi)
+library(tidyverse)
+library(tigris)
+library(sf)
+library(leaflet)
+library(mapview)
+library(ggplot2)
+
+Sys.setenv(CENSUS_KEY="c8aa67e4086b4b5ce3a8717f59faa9a28f611dab")
+```
+
+```{r}
+acs_vars_2019_1yr <-
+  listCensusMetadata(
+    name = "2019/acs/acs1",
+    type = "variables"
+  )
+
+bay_mobility_current_19 <- 
+  getCensus(
+    name = "acs/acs1",
+    vintage = 2019,
+    region = "county:001,013,041,055,075,081,085,095,097",
+    regionin = "state:06",
+    vars = c("group(B07010)")
+  ) %>% 
+  select(!c(GEO_ID,state,NAME) & !ends_with(c("EA","MA","M"))) %>%
+  pivot_longer(
+    ends_with("E"),
+    names_to = "variable",
+    values_to = "estimate"
+  ) %>%
+  left_join(
+    acs_vars_2019_1yr %>% 
+      select(name, label), 
+    by = c("variable" = "name")
+  ) %>% 
+  select(-variable) %>% 
+  separate(
+    label,
+    into = c(NA,NA,"mobility","temp","income"),
+    sep = "!!"
+  ) %>% 
+  mutate(
+    income = ifelse(
+      temp == "No income",
+      temp,
+      income
+    ),
+    mobility = ifelse(
+      mobility %in% c("Same house 1 year ago:", "Moved within same county:"),
+      "Here since last year",
+      "Inflow"
+    )
+  ) %>% 
+  filter(!is.na(income)) %>% 
+  group_by(county, mobility, income) %>% 
+  summarize(estimate = sum(estimate))
+
+bay_mobility_lastyear_19 <- 
+  getCensus(
+    name = "acs/acs1",
+    vintage = 2019,
+    region = "county:001,013,041,055,075,081,085,095,097",
+    regionin = "state:06",
+    vars = c("group(B07410)")
+  ) %>% 
+  select(!c(GEO_ID,state,NAME) & !ends_with(c("EA","MA","M"))) %>%
+  pivot_longer(
+    ends_with("E"),
+    names_to = "variable",
+    values_to = "estimate"
+  ) %>%
+  left_join(
+    acs_vars_2019_1yr %>% 
+      select(name, label), 
+    by = c("variable" = "name")
+  ) %>% 
+  select(-variable) %>% 
+  separate(
+    label,
+    into = c(NA,NA,"mobility","temp","income"),
+    sep = "!!"
+  ) %>% 
+  mutate(
+    income = ifelse(
+      temp == "No income",
+      temp,
+      income
+    ),
+    mobility = ifelse(
+      mobility %in% c("Same house:", "Moved within same county:"),
+      "Here since last year",
+      "Outflow"
+    )
+  ) %>% 
+  filter(!is.na(income)) %>% 
+  group_by(county, mobility, income) %>% 
+  summarize(estimate = sum(estimate))
+
+bay_mobility_current_18 <- 
+  getCensus(
+    name = "acs/acs1",
+    vintage = 2018,
+    region = "county:001,013,041,055,075,081,085,095,097",
+    regionin = "state:06",
+    vars = c("group(B07010)")
+  ) %>% 
+  select(!c(GEO_ID,state,NAME) & !ends_with(c("EA","MA","M"))) %>%
+  pivot_longer(
+    ends_with("E"),
+    names_to = "variable",
+    values_to = "estimate"
+  ) %>%
+  left_join(
+    acs_vars_2019_1yr %>% 
+      select(name, label), 
+    by = c("variable" = "name")
+  ) %>% 
+  select(-variable) %>% 
+  separate(
+    label,
+    into = c(NA,NA,"mobility","temp","income"),
+    sep = "!!"
+  ) %>% 
+  mutate(
+    income = ifelse(
+      temp == "No income",
+      temp,
+      income
+    ),
+    mobility = "Here last year"
+  ) %>% 
+  filter(!is.na(income)) %>% 
+  group_by(county, mobility, income) %>% 
+  summarize(estimate = sum(estimate))
+
+bay_flows_19 <-
+  rbind(
+    bay_mobility_current_18,
+    bay_mobility_lastyear_19 %>% 
+      filter(mobility == "Outflow"),
+    bay_mobility_current_19 %>% 
+      filter(mobility == "Inflow"),
+    bay_mobility_current_19 %>% 
+      group_by(county,income) %>% 
+      summarize(estimate = sum(estimate)) %>% 
+      mutate(mobility = "Here this year")
+  ) %>% 
+  pivot_wider(
+    names_from = mobility,
+    values_from = estimate
+  ) %>% 
+  mutate(
+    `External net` = Inflow - Outflow,
+    `Internal net` = `Here this year` - `Here last year` - `External net`,
+  ) %>% 
+  select(
+    `Income tier` = income, 
+    `Internal net`,
+    `External net`,
+    `Here last year`, 
+    `Here this year`, 
+    Outflow, 
+    Inflow
+  ) %>%
+  mutate(year = 2019)
+```
+
+```{r}
+acs_vars_2018_1yr <-
+  listCensusMetadata(
+    name = "2018/acs/acs1",
+    type = "variables"
+  )
+
+bay_mobility_current_18 <- 
+  getCensus(
+    name = "acs/acs1",
+    vintage = 2018,
+    region = "county:001,013,041,055,075,081,085,095,097",
+    regionin = "state:06",
+    vars = c("group(B07010)")
+  ) %>% 
+  select(!c(GEO_ID,state,NAME) & !ends_with(c("EA","MA","M"))) %>%
+  pivot_longer(
+    ends_with("E"),
+    names_to = "variable",
+    values_to = "estimate"
+  ) %>%
+  left_join(
+    acs_vars_2018_1yr %>% 
+      select(name, label), 
+    by = c("variable" = "name")
+  ) %>% 
+  select(-variable) %>% 
+  separate(
+    label,
+    into = c(NA,NA,"mobility","temp","income"),
+    sep = "!!"
+  ) %>% 
+  mutate(
+    income = ifelse(
+      temp == "No income",
+      temp,
+      income
+    ),
+    mobility = ifelse(
+      mobility %in% c("Same house 1 year ago:", "Moved within same county:"),
+      "Here since last year",
+      "Inflow"
+    )
+  ) %>% 
+  filter(!is.na(income)) %>% 
+  group_by(county, mobility, income) %>% 
+  summarize(estimate = sum(estimate))
+
+bay_mobility_lastyear_18 <- 
+  getCensus(
+    name = "acs/acs1",
+    vintage = 2018,
+    region = "county:001,013,041,055,075,081,085,095,097",
+    regionin = "state:06",
+    vars = c("group(B07410)")
+  ) %>% 
+  select(!c(GEO_ID,state,NAME) & !ends_with(c("EA","MA","M"))) %>%
+  pivot_longer(
+    ends_with("E"),
+    names_to = "variable",
+    values_to = "estimate"
+  ) %>%
+  left_join(
+    acs_vars_2018_1yr %>% 
+      select(name, label), 
+    by = c("variable" = "name")
+  ) %>% 
+  select(-variable) %>% 
+  separate(
+    label,
+    into = c(NA,NA,"mobility","temp","income"),
+    sep = "!!"
+  ) %>% 
+  mutate(
+    income = ifelse(
+      temp == "No income",
+      temp,
+      income
+    ),
+    mobility = ifelse(
+      mobility %in% c("Same house:", "Moved within same county:"),
+      "Here since last year",
+      "Outflow"
+    )
+  ) %>% 
+  filter(!is.na(income)) %>% 
+  group_by(county, mobility, income) %>% 
+  summarize(estimate = sum(estimate))
+
+bay_mobility_current_17 <- 
+  getCensus(
+    name = "acs/acs1",
+    vintage = 2017,
+    region = "county:001,013,041,055,075,081,085,095,097",
+    regionin = "state:06",
+    vars = c("group(B07010)")
+  ) %>% 
+  select(!c(GEO_ID,state,NAME) & !ends_with(c("EA","MA","M"))) %>%
+  pivot_longer(
+    ends_with("E"),
+    names_to = "variable",
+    values_to = "estimate"
+  ) %>%
+  left_join(
+    acs_vars_2018_1yr %>% 
+      select(name, label), 
+    by = c("variable" = "name")
+  ) %>% 
+  select(-variable) %>% 
+  separate(
+    label,
+    into = c(NA,NA,"mobility","temp","income"),
+    sep = "!!"
+  ) %>% 
+  mutate(
+    income = ifelse(
+      temp == "No income",
+      temp,
+      income
+    ),
+    mobility = "Here last year"
+  ) %>% 
+  filter(!is.na(income)) %>% 
+  group_by(county, mobility, income) %>% 
+  summarize(estimate = sum(estimate))
+
+bay_flows_18 <-
+  rbind(
+    bay_mobility_current_17,
+    bay_mobility_lastyear_18 %>% 
+      filter(mobility == "Outflow"),
+    bay_mobility_current_18 %>% 
+      filter(mobility == "Inflow"),
+    bay_mobility_current_18 %>% 
+      group_by(county, income) %>% 
+      summarize(estimate = sum(estimate)) %>% 
+      mutate(mobility = "Here this year")
+  ) %>% 
+  pivot_wider(
+    names_from = mobility,
+    values_from = estimate
+  ) %>% 
+  mutate(
+    `External net` = Inflow - Outflow,
+    `Internal net` = `Here this year` - `Here last year` - `External net`,
+  ) %>% 
+  select(
+    `Income tier` = income, 
+    `Internal net`,
+    `External net`,
+    `Here last year`, 
+    `Here this year`, 
+    Outflow, 
+    Inflow
+  ) %>%
+  mutate(year = 2018)
+```
+
+```{r}
+acs_vars_2017_1yr <-
+  listCensusMetadata(
+    name = "2017/acs/acs1",
+    type = "variables"
+  )
+
+bay_mobility_current_17 <- 
+  getCensus(
+    name = "acs/acs1",
+    vintage = 2017,
+    region = "county:001,013,041,055,075,081,085,095,097",
+    regionin = "state:06",
+    vars = c("group(B07010)")
+  ) %>% 
+  select(!c(GEO_ID,state,NAME) & !ends_with(c("EA","MA","M"))) %>%
+  pivot_longer(
+    ends_with("E"),
+    names_to = "variable",
+    values_to = "estimate"
+  ) %>%
+  left_join(
+    acs_vars_2017_1yr %>% 
+      select(name, label), 
+    by = c("variable" = "name")
+  ) %>% 
+  select(-variable) %>% 
+  separate(
+    label,
+    into = c(NA,NA,"mobility","temp","income"),
+    sep = "!!"
+  ) %>% 
+  mutate(
+    income = ifelse(
+      temp == "No income",
+      temp,
+      income
+    ),
+    mobility = ifelse(
+      mobility %in% c("Same house 1 year ago:", "Moved within same county:"),
+      "Here since last year",
+      "Inflow"
+    )
+  ) %>% 
+  filter(!is.na(income)) %>% 
+  group_by(county, mobility, income) %>% 
+  summarize(estimate = sum(estimate))
+
+bay_mobility_lastyear_17 <- 
+  getCensus(
+    name = "acs/acs1",
+    vintage = 2017,
+    region = "county:001,013,041,055,075,081,085,095,097",
+    regionin = "state:06",
+    vars = c("group(B07410)")
+  ) %>% 
+  select(!c(GEO_ID,state,NAME) & !ends_with(c("EA","MA","M"))) %>%
+  pivot_longer(
+    ends_with("E"),
+    names_to = "variable",
+    values_to = "estimate"
+  ) %>%
+  left_join(
+    acs_vars_2017_1yr %>% 
+      select(name, label), 
+    by = c("variable" = "name")
+  ) %>% 
+  select(-variable) %>% 
+  separate(
+    label,
+    into = c(NA,NA,"mobility","temp","income"),
+    sep = "!!"
+  ) %>% 
+  mutate(
+    income = ifelse(
+      temp == "No income",
+      temp,
+      income
+    ),
+    mobility = ifelse(
+      mobility %in% c("Same house:", "Moved within same county:"),
+      "Here since last year",
+      "Outflow"
+    )
+  ) %>% 
+  filter(!is.na(income)) %>% 
+  group_by(county, mobility, income) %>% 
+  summarize(estimate = sum(estimate))
+
+bay_mobility_current_16 <- 
+  getCensus(
+    name = "acs/acs1",
+    vintage = 2016,
+    region = "county:001,013,041,055,075,081,085,095,097",
+    regionin = "state:06",
+    vars = c("group(B07010)")
+  ) %>% 
+  select(!c(GEO_ID,state,NAME) & !ends_with(c("EA","MA","M"))) %>%
+  pivot_longer(
+    ends_with("E"),
+    names_to = "variable",
+    values_to = "estimate"
+  ) %>%
+  left_join(
+    acs_vars_2017_1yr %>% 
+      select(name, label), 
+    by = c("variable" = "name")
+  ) %>% 
+  select(-variable) %>% 
+  separate(
+    label,
+    into = c(NA,NA,"mobility","temp","income"),
+    sep = "!!"
+  ) %>% 
+  mutate(
+    income = ifelse(
+      temp == "No income",
+      temp,
+      income
+    ),
+    mobility = "Here last year"
+  ) %>% 
+  filter(!is.na(income)) %>% 
+  group_by(county, mobility, income) %>% 
+  summarize(estimate = sum(estimate))
+
+bay_flows_17 <-
+  rbind(
+    bay_mobility_current_16,
+    bay_mobility_lastyear_17 %>% 
+      filter(mobility == "Outflow"),
+    bay_mobility_current_17 %>% 
+      filter(mobility == "Inflow"),
+    bay_mobility_current_17 %>% 
+      group_by(county, income) %>% 
+      summarize(estimate = sum(estimate)) %>% 
+      mutate(mobility = "Here this year")
+  ) %>% 
+  pivot_wider(
+    names_from = mobility,
+    values_from = estimate
+  ) %>% 
+  mutate(
+    `External net` = Inflow - Outflow,
+    `Internal net` = `Here this year` - `Here last year` - `External net`,
+  ) %>% 
+  select(
+    `Income tier` = income, 
+    `Internal net`,
+    `External net`,
+    `Here last year`, 
+    `Here this year`, 
+    Outflow, 
+    Inflow
+  ) %>%
+  mutate(year = 2017)
+```
+
+```{r}
+acs_vars_2016_1yr <-
+  listCensusMetadata(
+    name = "2016/acs/acs1",
+    type = "variables"
+  )
+
+bay_mobility_current_16 <- 
+  getCensus(
+    name = "acs/acs1",
+    vintage = 2016,
+    region = "county:001,013,041,055,075,081,085,095,097",
+    regionin = "state:06",
+    vars = c("group(B07010)")
+  ) %>% 
+  select(!c(GEO_ID,state,NAME) & !ends_with(c("EA","MA","M"))) %>%
+  pivot_longer(
+    ends_with("E"),
+    names_to = "variable",
+    values_to = "estimate"
+  ) %>%
+  left_join(
+    acs_vars_2016_1yr %>% 
+      select(name, label), 
+    by = c("variable" = "name")
+  ) %>% 
+  select(-variable) %>% 
+  separate(
+    label,
+    into = c(NA,NA,"mobility","temp","income"),
+    sep = "!!"
+  ) %>% 
+  mutate(
+    income = ifelse(
+      temp == "No income",
+      temp,
+      income
+    ),
+    mobility = ifelse(
+      mobility %in% c("Same house 1 year ago:", "Moved within same county:"),
+      "Here since last year",
+      "Inflow"
+    )
+  ) %>% 
+  filter(!is.na(income)) %>% 
+  group_by(county, mobility, income) %>% 
+  summarize(estimate = sum(estimate))
+
+bay_mobility_lastyear_16 <- 
+  getCensus(
+    name = "acs/acs1",
+    vintage = 2016,
+    region = "county:001,013,041,055,075,081,085,095,097",
+    regionin = "state:06",
+    vars = c("group(B07410)")
+  ) %>% 
+  select(!c(GEO_ID,state,NAME) & !ends_with(c("EA","MA","M"))) %>%
+  pivot_longer(
+    ends_with("E"),
+    names_to = "variable",
+    values_to = "estimate"
+  ) %>%
+  left_join(
+    acs_vars_2016_1yr %>% 
+      select(name, label), 
+    by = c("variable" = "name")
+  ) %>% 
+  select(-variable) %>% 
+  separate(
+    label,
+    into = c(NA,NA,"mobility","temp","income"),
+    sep = "!!"
+  ) %>% 
+  mutate(
+    income = ifelse(
+      temp == "No income",
+      temp,
+      income
+    ),
+    mobility = ifelse(
+      mobility %in% c("Same house:", "Moved within same county:"),
+      "Here since last year",
+      "Outflow"
+    )
+  ) %>% 
+  filter(!is.na(income)) %>% 
+  group_by(county, mobility, income) %>% 
+  summarize(estimate = sum(estimate))
+
+bay_mobility_current_15 <- 
+  getCensus(
+    name = "acs/acs1",
+    vintage = 2015,
+    region = "county:001,013,041,055,075,081,085,095,097",
+    regionin = "state:06",
+    vars = c("group(B07010)")
+  ) %>% 
+  select(!c(GEO_ID,state,NAME) & !ends_with(c("EA","MA","M"))) %>%
+  pivot_longer(
+    ends_with("E"),
+    names_to = "variable",
+    values_to = "estimate"
+  ) %>%
+  left_join(
+    acs_vars_2019_1yr %>% 
+      select(name, label), 
+    by = c("variable" = "name")
+  ) %>% 
+  select(-variable) %>% 
+  separate(
+    label,
+    into = c(NA,NA,"mobility","temp","income"),
+    sep = "!!"
+  ) %>% 
+  mutate(
+    income = ifelse(
+      temp == "No income",
+      temp,
+      income
+    ),
+    mobility = "Here last year"
+  ) %>% 
+  filter(!is.na(income)) %>% 
+  group_by(county, mobility, income) %>% 
+  summarize(estimate = sum(estimate))
+
+bay_flows_16 <-
+  rbind(
+    bay_mobility_current_15,
+    bay_mobility_lastyear_16 %>% 
+      filter(mobility == "Outflow"),
+    bay_mobility_current_16 %>% 
+      filter(mobility == "Inflow"),
+    bay_mobility_current_16 %>% 
+      group_by(county, income) %>% 
+      summarize(estimate = sum(estimate)) %>% 
+      mutate(mobility = "Here this year")
+  ) %>% 
+  pivot_wider(
+    names_from = mobility,
+    values_from = estimate
+  ) %>% 
+  mutate(
+    `External net` = Inflow - Outflow,
+    `Internal net` = `Here this year` - `Here last year` - `External net`,
+  ) %>% 
+  select(
+    `Income tier` = income, 
+    `Internal net`,
+    `External net`,
+    `Here last year`, 
+    `Here this year`, 
+    Outflow, 
+    Inflow
+  ) %>%
+  mutate(year = 2016)
+```
+
+```{r}
+acs_vars_2015_1yr <-
+  listCensusMetadata(
+    name = "2019/acs/acs1",
+    type = "variables"
+  )
+
+bay_mobility_current_15 <- 
+  getCensus(
+    name = "acs/acs1",
+    vintage = 2015,
+    region = "county:001,013,041,055,075,081,085,095,097",
+    regionin = "state:06",
+    vars = c("group(B07010)")
+  ) %>% 
+  select(!c(GEO_ID,state,NAME) & !ends_with(c("EA","MA","M"))) %>%
+  pivot_longer(
+    ends_with("E"),
+    names_to = "variable",
+    values_to = "estimate"
+  ) %>%
+  left_join(
+    acs_vars_2019_1yr %>% 
+      select(name, label), 
+    by = c("variable" = "name")
+  ) %>% 
+  select(-variable) %>% 
+  separate(
+    label,
+    into = c(NA,NA,"mobility","temp","income"),
+    sep = "!!"
+  ) %>% 
+  mutate(
+    income = ifelse(
+      temp == "No income",
+      temp,
+      income
+    ),
+    mobility = ifelse(
+      mobility %in% c("Same house 1 year ago:", "Moved within same county:"),
+      "Here since last year",
+      "Inflow"
+    )
+  ) %>% 
+  filter(!is.na(income)) %>% 
+  group_by(county, mobility, income) %>% 
+  summarize(estimate = sum(estimate))
+
+bay_mobility_lastyear_15 <- 
+  getCensus(
+    name = "acs/acs1",
+    vintage = 2015,
+    region = "county:001,013,041,055,075,081,085,095,097",
+    regionin = "state:06",
+    vars = c("group(B07410)")
+  ) %>% 
+  select(!c(GEO_ID,state,NAME) & !ends_with(c("EA","MA","M"))) %>%
+  pivot_longer(
+    ends_with("E"),
+    names_to = "variable",
+    values_to = "estimate"
+  ) %>%
+  left_join(
+    acs_vars_2015_1yr %>% 
+      select(name, label), 
+    by = c("variable" = "name")
+  ) %>% 
+  select(-variable) %>% 
+  separate(
+    label,
+    into = c(NA,NA,"mobility","temp","income"),
+    sep = "!!"
+  ) %>% 
+  mutate(
+    income = ifelse(
+      temp == "No income",
+      temp,
+      income
+    ),
+    mobility = ifelse(
+      mobility %in% c("Same house:", "Moved within same county:"),
+      "Here since last year",
+      "Outflow"
+    )
+  ) %>% 
+  filter(!is.na(income)) %>% 
+  group_by(county, mobility, income) %>% 
+  summarize(estimate = sum(estimate))
+
+bay_mobility_current_14 <- 
+  getCensus(
+    name = "acs/acs1",
+    vintage = 2014,
+    region = "county:001,013,041,055,075,081,085,095,097",
+    regionin = "state:06",
+    vars = c("group(B07010)")
+  ) %>% 
+  select(!c(GEO_ID,state,NAME) & !ends_with(c("EA","MA","M"))) %>%
+  pivot_longer(
+    ends_with("E"),
+    names_to = "variable",
+    values_to = "estimate"
+  ) %>%
+  left_join(
+    acs_vars_2015_1yr %>% 
+      select(name, label), 
+    by = c("variable" = "name")
+  ) %>% 
+  select(-variable) %>% 
+  separate(
+    label,
+    into = c(NA,NA,"mobility","temp","income"),
+    sep = "!!"
+  ) %>% 
+  mutate(
+    income = ifelse(
+      temp == "No income",
+      temp,
+      income
+    ),
+    mobility = "Here last year"
+  ) %>% 
+  filter(!is.na(income)) %>% 
+  group_by(county, mobility, income) %>% 
+  summarize(estimate = sum(estimate))
+
+bay_flows_15 <-
+  rbind(
+    bay_mobility_current_14,
+    bay_mobility_lastyear_15 %>% 
+      filter(mobility == "Outflow"),
+    bay_mobility_current_15 %>% 
+      filter(mobility == "Inflow"),
+    bay_mobility_current_15 %>% 
+      group_by(county, income) %>% 
+      summarize(estimate = sum(estimate)) %>% 
+      mutate(mobility = "Here this year")
+  ) %>% 
+  pivot_wider(
+    names_from = mobility,
+    values_from = estimate
+  ) %>% 
+  mutate(
+    `External net` = Inflow - Outflow,
+    `Internal net` = `Here this year` - `Here last year` - `External net`,
+  ) %>% 
+  select(
+    `Income tier` = income, 
+    `Internal net`,
+    `External net`,
+    `Here last year`, 
+    `Here this year`, 
+    Outflow, 
+    Inflow
+  ) %>%
+  mutate(year = 2015)
+```
+
+Here is a snapshot of the data table for the migrations in bay counties each year. The external net refers to the population change due to people migrating out or moving in, while the internal net refers to the population change due to births or death.
+
+```{r}
+bay_flow <- bind_rows(bay_flows_15,bay_flows_16,bay_flows_17,bay_flows_18,bay_flows_19)
+head(bay_flow)
+```
+
+```{r}
+saveRDS(bay_flow, "bay_flow.rds")
+# bay_flow <- readRDS("bay_flow.rds")
+```
+
+```{r}
+bay_county_names <-
+  c(
+    "Alameda",
+    "Contra Costa",
+    "Marin",
+    "Napa",
+    "San Francisco",
+    "San Mateo",
+    "Santa Clara",
+    "Solano",
+    "Sonoma"
+  )
+
+bay_counties <-
+  counties("CA", cb = T, progress_bar = F) %>%
+  filter(NAME %in% bay_county_names)
+
+bay_flow_map <- bay_flow %>%
+  group_by(county) %>%
+  summarise(mean_net_inflow = mean(`External net`))%>%
+  left_join(
+    bay_counties %>% 
+      select(COUNTYFP),
+    by = c("county" = "COUNTYFP")
+  ) %>% 
+st_as_sf()
+
+flow_pal <- colorNumeric(
+  palette = "Blues",
+  domain = bay_flow_map$mean_net_inflow
+)
+
+leaflet() %>%
+  addTiles() %>% 
+  addPolygons(
+    data = bay_flow_map,
+    fillColor = ~flow_pal(mean_net_inflow),
+    color = "white",
+    opacity = 0.5,
+    fillOpacity = 0.5,
+    weight = 1,
+    label = ~paste(
+      "mean net inflow is",
+      round(mean_net_inflow)
+    ),
+    highlightOptions = highlightOptions(
+      weight = 2,
+      opacity = 1
+    )
+  ) %>% 
+  addLegend(
+    data = bay_flow_map,
+    pal = flow_pal,
+    values = ~mean_net_inflow,
+    title = "mean net inflow population</br> per county 2014-2019"
+  )
+```
+
+This maps shows the average net inflow in the 9 bay area counties from 2014 to 2019. We can see that although there are many people moving in and out every year, in general, there are more people moving into Santa Clara county, where most tech companies are clustered in, than leaving the county. While at the same time, less people are moving into the San Mateo county and there are more people leaving Napa county.
+
+```{r}
+model <- lm(`External net`~ `Income tier`, data = bay_flow)
+summary(model)
+```
+```{r}
+plot(density(residuals(model)))
+```
+If we do a linear regression model to set y as net inflow and x as income tier, we can see that the model's residual is pretty normal. However, the only two significant elements are the the income tier of $75,000 or more and No income. If we can say richer people are moving into the bay counties, then the large inflow of population with no income does not really make sense. The very low R squared value also suggests that there is not significant correlation between people's income tier and their migration pattern into the bay counties.
+
+Next we want to explore whether the extremely high housing price in bay area is forcing people to live far away from the convenient locations and therefore having longer commute time. 
+```{r}
+pums_2015_2019<- 2015:2019 %>%
+  map_dfr(function(x){  
+    getCensus(
+    name = "acs/acs1/pums",
+    vintage = x,
+    region = "public use microdata area:*",
+    regionin = "state:06",
+    vars = c(
+     "SERIALNO", # housing
+     "SPORDER", # person
+     "PWGTP", # weighting
+     "WGTP", #weighting
+     "BLD", #units in structure
+     "TEN", # tenure 
+     "VALP", #housing value
+     "MV", #when moved in
+     "HINCP", #household income
+     "JWMNP", #commute time
+     "OCPIP" # rent as percentage of monthly income
+   )) %>%
+     mutate(year = x)
+  }
+ )
+```
+
+```{r}
+saveRDS(pums_2015_2019, "final_pums.rds")
+# pums_2019_5yr <- readRDS("final_pums.rds")
+```
+
+```{r}
+ca_pumas <-
+  pumas("CA", cb = T, progress_bar = F)
+
+bay_pumas <-
+  ca_pumas %>% 
+  st_centroid() %>% 
+  .[bay_counties, ] %>% 
+  st_drop_geometry() %>% 
+  left_join(ca_pumas %>% select(GEOID10)) %>% 
+  st_as_sf()
+
+bay_pums_5yrs <-
+  pums_2015_2019 %>% 
+  mutate(
+    PUMA = str_pad(public_use_microdata_area,5,"left","0")
+  ) %>% 
+  filter(PUMA %in% bay_pumas$PUMACE10)%>% 
+  mutate(JWMNP = as.numeric(JWMNP)) %>%
+  filter(JWMNP > 0 & JWMNP < 200) %>%
+  mutate(TEN = as.numeric(TEN)) %>%
+  filter(TEN > 0) %>%
+  filter(TEN < 4) %>%
+  select(-state) 
+
+bay_pums_5yrs$TEN = gsub("1","own with loan", bay_pums_5yrs$TEN)
+bay_pums_5yrs$TEN = gsub("2","own free and clear", bay_pums_5yrs$TEN)
+bay_pums_5yrs$TEN = gsub("3","rented", bay_pums_5yrs$TEN)
+
+saveRDS(bay_pums_5yrs, "final_bay_pums.rds")
+```
+
+```{r}
+bay_pums_5yrs <- readRDS("final_bay_pums.rds")
+```
+
+```{r}
+bay_pums_5yrs <- bay_pums_5yrs %>%
+  mutate(VALP = as.numeric(VALP)) %>%
+  mutate(HINCP = as.numeric(HINCP)) %>%
+  mutate(OCPIP = as.numeric(OCPIP)) %>%
+  mutate(JWMNP = as.numeric(JWMNP))
+```
+
+```{r}
+bay_commute <- bay_pums_5yrs %>% 
+  group_by(TEN, year) %>% 
+  summarise(commute_mean = mean(JWMNP))
+
+ggplot(data=bay_commute, aes(x=year, y=commute_mean, color=TEN)) +
+  geom_line()+
+  labs(
+    title = "Average Commuting Time 2015 - 2019",
+    y = "mean daily commute time one-way (mins)",
+    color = "Housing Type"
+  )
+```
+I first took a look at people's commute time from 2015 to 2019. The commute time has been constantly increasing. It seems on average people who have their houses owned free and clear are closer to their work compared to those are still paying their debts. It makes a lot of sense because it is very possible that people who have paid off all their housing mortgages or bought their house in full cash are either those who have much higher income and wealth or their bought their houses long times ago, when housing prices were not crazily high at the time. We can also see in the following chart that the median housing price has also been increasing constantly, and the housing value for those are still on mortgages are higher than those owned free and clear. 
+
+```{r}
+bay_housing_value <- 
+  bay_pums_5yrs %>% 
+  mutate(VALP = as.numeric(VALP)) %>%
+  filter(VALP>0) %>%
+  filter(TEN != "rented") %>% 
+  group_by(year, TEN) %>%
+  summarise(med_housing_value= median(VALP))
+
+ggplot(data=bay_housing_value, aes(x=year, y = med_housing_value , color = TEN)) +
+  geom_line() +
+  labs(
+    title = "Median housing value",
+    y = "median housing value ($)",
+    color = "Housing Type"
+  )
+```
+
+Next, I plotted maps to show the average commute time and the median housing price among census tracts. Not surprising at all, when the areas have lower housing prices, their average commute time will be higher. We can see that in the south bay areas, the census tracts that are closer to the silicon valley also have lower mean commute time but higher housing value. While in east bay area where housing are cheaper, the average commute time is a lot higher.
+
+```{r}
+bay_commute_pums <- bay_pums_5yrs %>% 
+  group_by(PUMA) %>% 
+  summarise(commute_mean = mean(JWMNP)) %>% 
+  left_join(
+    bay_pumas %>% 
+      select(PUMACE10),
+    by = c("PUMA" = "PUMACE10")
+  ) %>% 
+  st_as_sf()
+
+pums_pal <- colorNumeric(
+  palette = "Oranges",
+  domain = bay_commute_pums$commute_mean
+)
+
+leaflet() %>%
+  addTiles() %>% 
+  addPolygons(
+    data = bay_commute_pums,
+    fillColor = ~pums_pal(commute_mean),
+    color = "white",
+    opacity = 0.5,
+    fillOpacity = 0.5,
+    weight = 1,
+    label = ~paste(
+      "mean time of commute (one-way) in min is",
+      round(commute_mean)
+    ),
+    highlightOptions = highlightOptions(
+      weight = 2,
+      opacity = 1
+    )
+  ) %>% 
+  addLegend(
+    data = bay_commute_pums,
+    pal = pums_pal,
+    values = ~commute_mean,
+    title = "mean time of commute"
+  )
+```
+
+
+
+```{r}
+bay_housing_value_pums <- bay_pums_5yrs %>% 
+  group_by(PUMA) %>% 
+  mutate(VALP = as.numeric(VALP)) %>%
+  filter(VALP>0) %>%
+  filter(TEN != "rented") %>%
+  summarise(median_housing_value = median(VALP)) %>% 
+  left_join(
+    bay_pumas %>% 
+      select(PUMACE10),
+    by = c("PUMA" = "PUMACE10")
+  ) %>% 
+  st_as_sf()
+
+pums_pal <- colorNumeric(
+  palette = "Purples",
+  domain = bay_housing_value_pums$median_housing_value
+)
+
+leaflet() %>%
+  addTiles() %>% 
+  addPolygons(
+    data = bay_housing_value_pums,
+    fillColor = ~pums_pal(median_housing_value),
+    color = "white",
+    opacity = 0.5,
+    fillOpacity = 0.5,
+    weight = 1,
+    label = ~paste0(
+      "Median housing value is $",
+      round(median_housing_value)
+    ),
+    highlightOptions = highlightOptions(
+      weight = 2,
+      opacity = 1
+    )
+  ) %>% 
+  addLegend(
+    data = bay_housing_value_pums,
+    pal = pums_pal,
+    values = ~median_housing_value,
+    title = "median housing value"
+  )
+```
+
+If we plot a chart for commute time against housing value, we can see a slight downward trend for commute time when housing prices increases.
+
+```{r}
+ggplot(
+  data = bay_pums_5yrs,
+  aes(
+    x= VALP,
+    y= JWMNP
+  )
+) +
+  geom_point()+
+  geom_smooth(method = "lm") +
+  labs(
+    title = "Commute Time vs Housing Value",
+    x = "housing value" ,
+    y = "commute tiem"
+  )
+```
+
+```{r}
+model <- lm(JWMNP~VALP, data = bay_pums_5yrs)
+summary(model)
+```
+If we build a linear regression model for it, we can see that the overall average   commute time (i.e. the intercept) for San Francisco bay area residents is 34 mins, and it is statistically significant with a p-value lower than 0.001. For each 1 dollar increase in the housing value, the commute time on average decreases by 9.252e-07 min. Although the number is very small, the decreasing trend is statistically significant. However, the model has a very low R squared value, which means less than 1% of the variability in commute time is captured by the model and therefore should not be used to predict. Besides, there can be many different confounding variables involved, so I continued to add more variables into the model. 
+```{r}
+library(corrplot)
+
+correlationplot <- bay_pums_5yrs %>% 
+  select(
+    JWMNP, 
+    VALP,
+    HINCP,
+    OCPIP
+  ) %>% 
+  cor()
+
+corrplot(
+  correlationplot, 
+  method = "number",
+  type = "upper"
+)
+
+```
+
+If we draw a correlation plot, we can see that the correlation coefficient for commute time (JWMNP) with all the other continuous variables (VALP - housing value, HINCP - household income, OCPIP - rent as percentage of monthly income) are very low. 
+
+If we build a multiple regression to include all the variables above along with year and PUMA, then we will get:
+```{r}
+model <- lm(JWMNP~year+VALP+HINCP+OCPIP+PUMA, data = bay_pums_5yrs)
+summary(model)
+```
+According to this model, we can see that there are many statistically significant correlations between the variables and the average commute time. When year increases or household income (HINCP) increases, on average the commute time will increase. On the other hand, housing value (VALP) and rent as percentage of monthly income (OCPIP) both have a negative correlation with commute time. While holding other variables constant, among the significant coefficients, PUMA 01307-01309 tracts on average also have the longest commute hours, which are more than ten mins longer than the baseline tract and PUMA 09703 tract has the shortest commute time (about 7 mins less than the baseline tract). However, the R squared value is still very low, indicating this model can capture few commute time variability and should not be used for predicting purpose.
+
+```{r}
+plot(density(residuals(model)))
+```
+
+If we plot the density for residuals, we can see that the distribution is skewed to the left, maybe a log transformation can help with the problem.
+
+```{r}
+log_model <-lm(log(JWMNP)~year+VALP+HINCP+OCPIP+PUMA, data = bay_pums_5yrs)
+summary(log_model)
+```
+
+```{r}
+plot(density(residuals(log_model)))
+```
+
+Although the density plot is not strictly normal, it looks less skewed than the last one, and log transformation seems to be appropriate here. The interpretation for the log transformed model is very similar to that of the original model, except that now the change for the commute time will be in percentage.
+
+
+
