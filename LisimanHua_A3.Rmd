@@ -1,0 +1,149 @@
+---
+title: "assignment 3"
+author: "Lisiman Hua"
+date: "12/14/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, warning = F, message = F)
+```
+
+```{r }
+library(censusapi)
+library(tidyverse)
+library(tigris)
+library(sf)
+library(leaflet)
+
+Sys.setenv(CENSUS_KEY="5042355b73b371569968738cfc4f492be94675c1")
+```
+
+Since we are trying to find the population that is more vulnerable to heat wave, based on pod and class discussion, I think people that do not have access to ice water and AC for indoor space will be in highest risk. Therefore, after looking at the dictionary, I chose to include a few variables that I think are relevant to be included in the dataset. 
+First, I think it is important to have fridge and running water, so people can get ice water whenever they need. Next, I think household income is also important proxy. Households with higher income will likely have more resources and flexibility to stay indoor when it comes to extreme weathers and other undesirable conditions. Among all the income variables, I think GRPIP (gross rent as a percentage of household income in the past 12 months) can be a good proxy. Poor families with less choices usually spend higher proportion of their income in rents. I have also included the variable indicating self-care difficulty because if someone cannot take care of themselves, it is very possible that when extreme heat waves come, they will be suffering more than other people. 
+
+```{r}
+pums_2019_1yr <- getCensus(
+  name = "acs/acs1/pums",
+  vintage = 2019,
+  region = "public use microdata area:*", 
+  regionin = "state:06",
+  vars = c(
+    "SERIALNO",
+    "REFR", #fridge
+    "RWAT", #running water
+    "FINCP", #family income
+    "GRPIP", #Gross rent as a percentage of household income past 12 months
+    "SPORDER",
+    "WGTP",# weight
+    "DDRS", #self-care difficulty
+    "HINCP", #household income
+    "TEN" #tenure
+  )
+)
+```
+
+```{r}
+ca_pumas <-
+  pumas("CA", cb = T, progress_bar = F)
+
+bay_county_names <-
+  c(
+    "Alameda",
+    "Contra Costa",
+    "Marin",
+    "Napa",
+    "San Francisco",
+    "San Mateo",
+    "Santa Clara",
+    "Solano",
+    "Sonoma"
+  )
+
+bay_counties <-
+  counties("CA", cb = T, progress_bar = F) %>%
+  filter(NAME %in% bay_county_names)
+
+bay_pumas <-
+  ca_pumas %>% 
+  st_centroid() %>% 
+  .[bay_counties, ] %>% 
+  st_drop_geometry() %>% 
+  left_join(ca_pumas %>% select(GEOID10)) %>% 
+  st_as_sf()
+
+bay_pums <-
+  pums_2019_1yr %>% 
+  mutate(
+    PUMA = str_pad(public_use_microdata_area,5,"left","0")
+  ) %>% 
+  filter(PUMA %in% bay_pumas$PUMACE10)
+```
+
+In my final dataset, I said people who fulfill one of the following conditions will be in higher risks when heat waves come:
+1) do not a fridge at home;
+2) do not have running water at home;
+3) spend more than 50% of household income in rents;
+4) have self-care difficulty.
+
+```{r}
+bay_pums_example <-
+  bay_pums %>% 
+  filter(!duplicated(SERIALNO)) %>% 
+  mutate(
+    WGTP = as.numeric(WGTP),
+    at_risk_of_heat_impact = ifelse(
+      (REFR == 2) |
+        (RWAT == 2) |
+        (GRPIP > 50) |
+        (DDRS == 1),
+      WGTP,
+      0
+    )
+  ) %>% 
+  group_by(PUMA) %>% 
+  summarize(
+    percent_at_risk_of_heat_impact =
+      sum(at_risk_of_heat_impact, na.rm =T)/sum(WGTP, na.rm = T)*100
+  ) %>% 
+  left_join(
+    bay_pumas %>% 
+      select(PUMACE10),
+    by = c("PUMA" = "PUMACE10")
+  ) %>% 
+  st_as_sf()
+```
+
+```{r}
+pums_pal <- colorNumeric(
+  palette = "Oranges",
+  domain = bay_pums_example$percent_at_risk_of_heat_impact
+)
+
+leaflet() %>%
+  addTiles() %>% 
+  addPolygons(
+    data = bay_pums_example,
+    fillColor = ~pums_pal(percent_at_risk_of_heat_impact),
+    color = "white",
+    opacity = 0.5,
+    fillOpacity = 0.5,
+    weight = 1,
+    label = ~paste0(
+      round(percent_at_risk_of_heat_impact), 
+      "% peope at risk of extreme heat impacts"
+    ),
+    highlightOptions = highlightOptions(
+      weight = 2,
+      opacity = 1
+    )
+  ) %>% 
+  addLegend(
+    data = bay_pums_example,
+    pal = pums_pal,
+    values = ~percent_at_risk_of_heat_impact,
+    title = "% people at risk of<br>extreme heat impacts"
+  )
+```
+
+Using the standard of having no fridge (so no ice), no running water, spending more than 50% of household income on renting, and having self-care difficulty, I have found out percentage of people in each PUMA tract that will be severely impacted by potential heat waves. It seems like downtown San Francisco and San Jose have highest percentage followed by areas near Richmond, Oakland, Antioch, Redwood city and Mountain View.
